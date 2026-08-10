@@ -1,0 +1,9 @@
+[submodule "lib/argparse"]
+	path = lib/argparse
+	url = https://github.com/cofyc/argparse/
+[submodule "lib/bin2c"]
+	path = lib/bin2c
+	url = https://github.com/adobe/bin2c
+[submodule "lib/progressbar"]
+	path = lib/progressbar
+	url = https://github.com/matu6968/progressbar

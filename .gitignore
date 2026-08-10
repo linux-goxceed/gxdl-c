@@ -1,0 +1,6 @@
+/build/
+/gxdl-c
+/libgxdl.a
+/libgxdl.so
+__pycache__/
+*.pyc
