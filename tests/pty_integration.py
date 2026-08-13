@@ -95,12 +95,19 @@ def finish(process, master, input_data=None, timeout=8):
     return stdout, stderr
 
 
-def emulate_boot(binary, loader_path, loader, handshake, run_response=b"RUNGET"):
+def emulate_boot(binary, loader_path, loader, handshake, run_response=b"RUNGET", chip=0x6701):
     process, master = spawn(binary, ["-b", loader_path])
     fragmented_write(master, handshake)
-    stage1 = read_exact(master, 8197)
-    assert stage1[:5] == b"\x59\x00\x08\x00\x00"
-    assert stage1[5:-4] == loader[0x20:0x201C]
+    if chip == 0x6612:
+        transfer_size = 0x4000
+    elif chip in (0x6616, 0x3211, 0x6701, 0x6705):
+        transfer_size = 0x2000
+    else:
+        transfer_size = 0x1000
+    payload_size = transfer_size - (0x20 if chip == 0x6612 else 4)
+    stage1 = read_exact(master, payload_size + 9)
+    assert stage1[:5] == b"\x59" + struct.pack("<H", transfer_size // 4) + b"\x00\x00"
+    assert stage1[5:-4] == loader[0x20:0x20 + payload_size]
     assert stage1[-4:] == b"boot"
     fragmented_write(master, run_response)
     metadata = read_exact(master, 8, timeout=4)
@@ -109,8 +116,7 @@ def emulate_boot(binary, loader_path, loader, handshake, run_response=b"RUNGET")
     stage2 = read_exact(master, size)
     expected = loader[:4] + loader[0x20:] + bytes(28)
     assert stage2 == expected
-    assert struct.unpack("<H", metadata[:2])[0] == sum(expected) & 0xFFFF
-    assert metadata[2:4] == b"\xc2\x00"
+    assert struct.unpack("<I", metadata[:4])[0] == sum(expected) & 0xFFFFFFFF
     fragmented_write(master, b"Boot OK\r\nboot> ")
     finish(process, master, timeout=18)
 
@@ -246,6 +252,8 @@ def main():
         for index, handshake in enumerate(variants):
             emulate_boot(binary, loader_path, loader, handshake,
                          b"RUN" if index == len(variants) - 1 else b"RUNGET")
+        emulate_boot(binary, loader_path, loader, b"\x00\xb0\xb0\x58",
+                     b"19RUkgd:3\r\nNGET")
         text_command(binary, "flash badinfo", b"no bad blocks")
         text_command(binary, "gx_otp tread 0 16", b"00 11 22 33")
         text_command(binary, "sflash_otp status", b"status: 0")

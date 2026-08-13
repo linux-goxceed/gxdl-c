@@ -6,7 +6,22 @@
 #include <string.h>
 
 bool gx_loader_validate(gx_loader *loader) {
-    if (loader->size < 0x2020U) {
+    size_t required = 0x2020U;
+    if (!loader || !loader->data) {
+        fprintf(stderr, "[!] Boot image is empty\n");
+        return false;
+    }
+    if (loader->size >= 8U) {
+        switch (gx_read_le16(loader->data + 6)) {
+        case 0x6612: required = 0x4000U; break;
+        case 0x6616:
+        case 0x3211:
+        case 0x6701:
+        case 0x6705: required = 0x2020U; break;
+        default: required = 0x1020U; break;
+        }
+    }
+    if (loader->size < required) {
         fprintf(stderr, "[!] Boot image is too small: %zu bytes\n", loader->size);
         return false;
     }

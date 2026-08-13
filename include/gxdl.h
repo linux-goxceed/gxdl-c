@@ -7,8 +7,6 @@
 #include <stdio.h>
 #include <sys/types.h>
 
-#define GX_STAGE1_PAYLOAD_SIZE 8188U
-#define GX_STAGE1_PACKET_SIZE 8197U
 #define GX_TRANSFER_CHUNK 1024U
 #define GX_STAGE2_CHUNK 2048U
 
@@ -85,8 +83,7 @@ size_t gx_embedded_loader_count(void);
 const gx_embedded_loader *gx_embedded_loader_at(size_t index);
 const gx_embedded_loader *gx_embedded_loader_find(const char *name);
 
-bool gx_build_stage1(const gx_loader *loader,
-                     uint8_t packet[GX_STAGE1_PACKET_SIZE]);
+bool gx_build_stage1(const gx_loader *loader, uint8_t **packet, size_t *size);
 bool gx_build_stage2(const gx_loader *loader, uint8_t **data, size_t *size,
                      uint8_t metadata[8]);
 bool gx_boot(gx_context *ctx, const gx_loader *loader, bool read_output);

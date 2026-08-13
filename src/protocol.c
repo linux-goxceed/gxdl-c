@@ -95,17 +95,32 @@ static bool wait_marker(gx_context *ctx, gx_buffer *buffer, const char *marker,
     }
 }
 
-bool gx_build_stage1(const gx_loader *loader,
-                     uint8_t packet[GX_STAGE1_PACKET_SIZE]) {
-    if (!loader || loader->size < 0x201cU)
+static size_t stage1_transfer_size(uint16_t chip) {
+    if (chip == 0x6612U) return 0x4000U;
+    if (chip == 0x6616U || chip == 0x3211U || chip == 0x6701U || chip == 0x6705U)
+        return 0x2000U;
+    return 0x1000U;
+}
+
+bool gx_build_stage1(const gx_loader *loader, uint8_t **packet, size_t *size) {
+    size_t transfer_size, payload_size;
+    uint8_t *result;
+    if (!loader || !packet || !size || loader->size < 8U)
         return false;
-    packet[0] = 0x59;
-    packet[1] = 0x00;
-    packet[2] = 0x08;
-    packet[3] = 0x00;
-    packet[4] = 0x00;
-    memcpy(packet + 5, loader->data + 0x20, GX_STAGE1_PAYLOAD_SIZE);
-    memcpy(packet + 5 + GX_STAGE1_PAYLOAD_SIZE, "boot", 4);
+    transfer_size = stage1_transfer_size(loader->chip);
+    payload_size = loader->chip == 0x6612U ? transfer_size - 0x20U : transfer_size - 4U;
+    if (loader->size < 0x20U + payload_size)
+        return false;
+    result = malloc(5U + payload_size + 4U);
+    if (!result)
+        return false;
+    result[0] = 0x59;
+    gx_write_le16(result + 1, (uint16_t)(transfer_size >> 2));
+    gx_write_le16(result + 3, 0);
+    memcpy(result + 5, loader->data + 0x20, payload_size);
+    memcpy(result + 5 + payload_size, "boot", 4);
+    *packet = result;
+    *size = 5U + payload_size + 4U;
     return true;
 }
 
@@ -123,8 +138,7 @@ bool gx_build_stage2(const gx_loader *loader, uint8_t **data, size_t *size,
     memcpy(content + 4, loader->data + 0x20, loader->size - 0x20);
     for (i = 0; i < loader->size; ++i)
         sum += content[i];
-    gx_write_le16(metadata, (uint16_t)sum);
-    gx_write_le16(metadata + 2, 0x00c2);
+    gx_write_le32(metadata, sum);
     gx_write_le32(metadata + 4, (uint32_t)loader->size);
     *data = content;
     *size = loader->size;
@@ -132,7 +146,7 @@ bool gx_build_stage2(const gx_loader *loader, uint8_t **data, size_t *size,
 }
 
 static bool wait_handshake(gx_context *ctx) {
-    uint8_t recent[4] = {0};
+    uint8_t recent[8] = {0};
     size_t count = 0;
     int64_t deadline = gx_now_ms() + 30000;
     fprintf(stderr, "[*] Waiting for device handshake; power-cycle or reset it now\n");
@@ -149,18 +163,108 @@ static bool wait_handshake(gx_context *ctx) {
             recent[count++] = byte;
         else {
             memmove(recent, recent + 1, sizeof(recent) - 1);
-            recent[3] = byte;
+            recent[sizeof(recent) - 1U] = byte;
         }
-        if ((count >= 3 && memcmp(recent + count - 3, "\xb0\xb0\x58", 3) == 0) ||
-            (count >= 4 && (memcmp(recent, "\xb8\xb0\xff\x58", 4) == 0 ||
-                            memcmp(recent, "\x00\xb0\xb0\x58", 4) == 0 ||
-                            memcmp(recent, "\xb0\x30\xff\x58", 4) == 0))) {
-            if (ctx->verbose)
-                fprintf(stderr, "[*] Handshake detected\n");
-            return true;
+        if (byte == 0x58U && count >= 3U) {
+            size_t end = count - 1U;
+            bool valid = recent[end - 2U] == 0x00U || recent[end - 2U] == 0xb0U ||
+                         recent[end - 2U] == 0xb8U;
+            if (!valid && count >= 4U)
+                valid = recent[end - 3U] == 0x00U || recent[end - 3U] == 0xb0U ||
+                        recent[end - 3U] == 0xb8U;
+            if (valid) {
+                if (ctx->verbose)
+                    fprintf(stderr, "[*] Handshake detected\n");
+                return true;
+            }
         }
     }
     fprintf(stderr, "[!] Timeout waiting for device handshake\n");
+    return false;
+}
+
+static bool ascii_equal(uint8_t value, char expected) {
+    return value == (uint8_t)expected || value == (uint8_t)(expected - 'A' + 'a');
+}
+
+static bool runget_has_contiguous(const gx_buffer *buffer) {
+    size_t i;
+    for (i = 0; i + 6U <= buffer->len; ++i) {
+        if (ascii_equal(buffer->data[i], 'R') && ascii_equal(buffer->data[i + 1U], 'U') &&
+            ascii_equal(buffer->data[i + 2U], 'N') && ascii_equal(buffer->data[i + 3U], 'G') &&
+            ascii_equal(buffer->data[i + 4U], 'E') && ascii_equal(buffer->data[i + 5U], 'T'))
+            return true;
+    }
+    return false;
+}
+
+static bool is_alnum_byte(uint8_t value) {
+    return (value >= 'A' && value <= 'Z') || (value >= 'a' && value <= 'z') ||
+           (value >= '0' && value <= '9');
+}
+
+static bool runget_has_token(const gx_buffer *buffer, const char token[4]) {
+    size_t i;
+    size_t length = strlen(token);
+    for (i = 0; i + length <= buffer->len; ++i) {
+        size_t j;
+        bool match = true;
+        if ((i > 0U && is_alnum_byte(buffer->data[i - 1U])) ||
+            (i + length < buffer->len && is_alnum_byte(buffer->data[i + length])))
+            continue;
+        for (j = 0; j < length; ++j) {
+            if (!ascii_equal(buffer->data[i + j], token[j])) {
+                match = false;
+                break;
+            }
+        }
+        if (match) return true;
+    }
+    return false;
+}
+
+static bool runget_has_short_sequence(const gx_buffer *buffer) {
+    size_t i, position = 0;
+    static const char pattern[] = "RUNGET";
+    for (i = 0; i < buffer->len && position < sizeof(pattern) - 1U; ++i) {
+        if (ascii_equal(buffer->data[i], pattern[position])) {
+            ++position;
+            continue;
+        }
+        if (position > 0U && is_alnum_byte(buffer->data[i]))
+            position = 0;
+        else if (position > 0U && i > 0U) {
+            size_t gap = 0;
+            size_t k = i;
+            while (k > 0U && !is_alnum_byte(buffer->data[k - 1U]) && gap <= 4U) {
+                --k;
+                ++gap;
+            }
+            if (gap > 4U) position = 0;
+        }
+    }
+    return position == sizeof(pattern) - 1U;
+}
+
+static bool runget_has_ordered(const gx_buffer *buffer, size_t max_gap) {
+    static const char pattern[] = "RUNGET";
+    size_t start;
+    for (start = 0; start < buffer->len; ++start) {
+        size_t position = 0, last = start, i;
+        if (!ascii_equal(buffer->data[start], pattern[0]))
+            continue;
+        position = 1;
+        for (i = start + 1U; i < buffer->len && position < sizeof(pattern) - 1U; ++i) {
+            if (!ascii_equal(buffer->data[i], pattern[position]))
+                continue;
+            if (i - last > max_gap)
+                break;
+            last = i;
+            ++position;
+        }
+        if (position == sizeof(pattern) - 1U)
+            return true;
+    }
     return false;
 }
 
@@ -170,12 +274,22 @@ static bool wait_runget(gx_context *ctx) {
     int64_t run_seen = 0;
     gx_buffer_init(&buffer);
     while (gx_now_ms() < deadline) {
-        if (gx_buffer_find(&buffer, "RUN", 3) >= 0 && run_seen == 0) {
+        if (runget_has_contiguous(&buffer)) {
+            fprintf(stderr, "[*] Detected RUNGET\n");
+            gx_buffer_free(&buffer);
+            return true;
+        }
+        if (runget_has_token(&buffer, "RUN") && run_seen == 0) {
             fprintf(stderr, "[*] Received RUN\n");
             run_seen = gx_now_ms();
         }
-        if (run_seen && gx_buffer_find(&buffer, "GET", 3) >= 0) {
+        if (run_seen && runget_has_token(&buffer, "GET")) {
             fprintf(stderr, "[*] Received GET\n");
+            gx_buffer_free(&buffer);
+            return true;
+        }
+        if (runget_has_short_sequence(&buffer) || runget_has_ordered(&buffer, 40U)) {
+            fprintf(stderr, "[*] Detected tolerant RUNGET variant\n");
             gx_buffer_free(&buffer);
             return true;
         }
@@ -218,16 +332,20 @@ static void read_boot_output(gx_context *ctx, int timeout_ms) {
 }
 
 bool gx_boot(gx_context *ctx, const gx_loader *loader, bool read_output) {
-    uint8_t stage1[GX_STAGE1_PACKET_SIZE];
+    uint8_t *stage1 = NULL;
+    size_t stage1_size = 0;
+    size_t stage1_payload_size;
     uint8_t metadata[8];
     uint8_t *stage2 = NULL;
     size_t stage2_size = 0, sent = 0;
     gx_progress progress;
-    if (!gx_build_stage1(loader, stage1) ||
+    if (!gx_build_stage1(loader, &stage1, &stage1_size) ||
         !gx_build_stage2(loader, &stage2, &stage2_size, metadata)) {
         fprintf(stderr, "[!] Could not construct boot packets\n");
+        free(stage1);
         return false;
     }
+    stage1_payload_size = stage1_size - 9U;
     if (gx_serial_pulse_resets(&ctx->serial, ctx->reset_dtr, ctx->reset_rts) != 0 &&
         ctx->verbose)
         fprintf(stderr, "[*] Reset flush failed; continuing\n");
@@ -235,11 +353,9 @@ bool gx_boot(gx_context *ctx, const gx_loader *loader, bool read_output) {
     if (!wait_handshake(ctx))
         goto fail;
     if (gx_serial_flush(&ctx->serial) != 0 ||
-        gx_serial_write_all(&ctx->serial, stage1, 5, 5000) != 0 ||
-        gx_serial_write_all(&ctx->serial, stage1 + 5,
-                            GX_STAGE1_PAYLOAD_SIZE, 5000) != 0 ||
-        gx_serial_write_all(&ctx->serial,
-                            stage1 + 5 + GX_STAGE1_PAYLOAD_SIZE, 4, 5000) != 0 ||
+        gx_serial_write_all(&ctx->serial, stage1, 5U, 5000) != 0 ||
+        gx_serial_write_all(&ctx->serial, stage1 + 5U, stage1_payload_size, 5000) != 0 ||
+        gx_serial_write_all(&ctx->serial, stage1 + 5U + stage1_payload_size, 4U, 5000) != 0 ||
         gx_serial_drain(&ctx->serial) != 0) {
         fprintf(stderr, "[!] Stage 1 write failed: %s\n", strerror(errno));
         goto fail;
@@ -271,12 +387,14 @@ bool gx_boot(gx_context *ctx, const gx_loader *loader, bool read_output) {
         goto fail;
     }
     progress_finish(&progress);
+    free(stage1);
     free(stage2);
     fprintf(stderr, "[+] Boot upload complete\n");
     if (read_output)
         read_boot_output(ctx, 15000);
     return true;
 fail:
+    free(stage1);
     free(stage2);
     return false;
 }

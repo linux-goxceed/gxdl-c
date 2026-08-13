@@ -41,7 +41,8 @@ static void test_buffer(void) {
 static void test_packets(void) {
     gx_loader loader;
     uint8_t *source = malloc(0x2020);
-    uint8_t packet[GX_STAGE1_PACKET_SIZE];
+    uint8_t *packet = NULL;
+    size_t packet_size = 0;
     uint8_t metadata[8];
     uint8_t *stage2 = NULL;
     size_t stage2_size = 0;
@@ -59,10 +60,11 @@ static void test_packets(void) {
     loader.size = 0x2020;
     assert(gx_loader_validate(&loader));
     assert(loader.version == 1 && loader.chip == 0x6701 && loader.baud == 115200);
-    assert(gx_build_stage1(&loader, packet));
+    assert(gx_build_stage1(&loader, &packet, &packet_size));
+    assert(packet_size == 8197U);
     assert(memcmp(packet, "\x59\x00\x08\x00\x00", 5) == 0);
-    assert(memcmp(packet + 5, source + 0x20, GX_STAGE1_PAYLOAD_SIZE) == 0);
-    assert(memcmp(packet + sizeof(packet) - 4, "boot", 4) == 0);
+    assert(memcmp(packet + 5, source + 0x20, 8188U) == 0);
+    assert(memcmp(packet + packet_size - 4, "boot", 4) == 0);
     assert(gx_build_stage2(&loader, &stage2, &stage2_size, metadata));
     assert(stage2_size == loader.size);
     assert(memcmp(stage2, "toob", 4) == 0);
@@ -71,11 +73,37 @@ static void test_packets(void) {
         assert(stage2[i] == 0);
     for (i = 0; i < stage2_size; ++i)
         sum += stage2[i];
-    assert(gx_read_le16(metadata) == (uint16_t)sum);
-    assert(gx_read_le16(metadata + 2) == 0x00c2);
+    assert(gx_read_le32(metadata) == sum);
     assert(gx_read_le32(metadata + 4) == loader.size);
+    free(packet);
     free(stage2);
     free(source);
+}
+
+static void test_chip_stage1_sizes(void) {
+    uint16_t chips[] = {0x6612, 0x6616, 0x3211, 0x6701, 0x6705, 0x9999};
+    size_t expected[] = {0x3fe0U + 9U, 0x1ffcU + 9U, 0x1ffcU + 9U,
+                         0x1ffcU + 9U, 0x1ffcU + 9U, 0xffcU + 9U};
+    size_t source_sizes[] = {0x4000U, 0x2020U, 0x2020U, 0x2020U, 0x2020U, 0x1020U};
+    size_t i;
+    for (i = 0; i < sizeof(chips) / sizeof(chips[0]); ++i) {
+        gx_loader loader;
+        uint8_t *source = calloc(1, source_sizes[i]);
+        uint8_t *packet = NULL;
+        size_t packet_size = 0;
+        assert(source);
+        memcpy(source, "toob", 4);
+        gx_write_le16(source + 6, chips[i]);
+        loader.data = source;
+        loader.size = source_sizes[i];
+        assert(gx_loader_validate(&loader));
+        assert(gx_build_stage1(&loader, &packet, &packet_size));
+        assert(packet_size == expected[i]);
+        assert(gx_read_le16(packet + 1) ==
+               (uint16_t)((i == 0U ? 0x4000U : (i < 5U ? 0x2000U : 0x1000U)) >> 2));
+        free(packet);
+        free(source);
+    }
 }
 
 static void test_parsing_and_compare(void) {
@@ -120,6 +148,7 @@ int main(void) {
     test_endian_and_checksum();
     test_buffer();
     test_packets();
+    test_chip_stage1_sizes();
     test_parsing_and_compare();
     test_public_api();
     assert(gx_embedded_loader_count() == 0);

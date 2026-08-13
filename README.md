@@ -177,6 +177,13 @@ is 115200. Use `--baud` for another supported termios rate.
 The reverse-engineered packet details and known handshake variants are in
 `reference/PROTOCOL.md`.
 
+The current uploader follows the chip-dependent Stage 1 layouts from the
+protocol reference: `0x6612` transfers `0x3fe0` payload bytes, the `0x6616`,
+`0x3211`, `0x6701`, and `0x6705` families transfer `0x1ffc` bytes, and other
+chips transfer `0xffc` bytes. Stage 2 uses a 32-bit little-endian additive
+checksum followed by the image size. Synchronization accepts split/noisy
+handshakes and tolerant RUNGET variants observed in IPL output.
+
 ## Using libgxdl
 
 The default build also creates `libgxdl.a` and `libgxdl.so`. The installed
