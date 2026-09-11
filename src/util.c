@@ -3,6 +3,7 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -62,10 +63,57 @@ bool gx_parse_u64(const char *text, uint64_t *value) {
     if (!text || !*text || text[0] == '-')
         return false;
     errno = 0;
-    parsed = strtoull(text, &end, 10);
+    parsed = strtoull(text, &end, 0);
     if (errno == ERANGE || !end || *end != '\0')
         return false;
     *value = (uint64_t)parsed;
+    return true;
+}
+
+uint16_t gx_read_be16(const uint8_t *p) {
+    return (uint16_t)(((uint32_t)p[0] << 8) | (uint32_t)p[1]);
+}
+
+void gx_write_be16(uint8_t *p, uint16_t value) {
+    p[0] = (uint8_t)(value >> 8);
+    p[1] = (uint8_t)value;
+}
+
+const char *gx_path_basename(const char *path) {
+    const char *slash;
+    if (!path || !*path)
+        return path;
+    slash = strrchr(path, '/');
+    return slash ? slash + 1 : path;
+}
+
+bool gx_read_file(const char *path, uint8_t **data, size_t *size) {
+    FILE *file;
+    long length;
+    uint8_t *bytes;
+    if (!path || !data || !size)
+        return false;
+    file = fopen(path, "rb");
+    if (!file) {
+        fprintf(stderr, "[!] Cannot open %s: %s\n", path, strerror(errno));
+        return false;
+    }
+    if (fseek(file, 0, SEEK_END) != 0 || (length = ftell(file)) < 0 ||
+        fseek(file, 0, SEEK_SET) != 0 || (unsigned long)length > SIZE_MAX) {
+        fprintf(stderr, "[!] Cannot determine size of %s\n", path);
+        fclose(file);
+        return false;
+    }
+    bytes = malloc((size_t)length ? (size_t)length : 1U);
+    if (!bytes || fread(bytes, 1, (size_t)length, file) != (size_t)length) {
+        fprintf(stderr, "[!] Cannot read %s\n", path);
+        free(bytes);
+        fclose(file);
+        return false;
+    }
+    fclose(file);
+    *data = bytes;
+    *size = (size_t)length;
     return true;
 }
 

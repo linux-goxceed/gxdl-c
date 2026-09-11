@@ -87,6 +87,13 @@ therefore does not require `-b` or `-m`:
 ./gxdl-c -t nns -d /dev/ttyUSB0 -c "flash badinfo"
 ```
 
+Open IPL images that print `GXID family=gemini` or `family=cygnus` after Stage 1
+need a matching DDR bootcode file for Stage 2 (`gx6702-bootcode.bin` or
+`gx6706-bootcode.bin`). Pass `--bootcode FILE` or `--bootcode-dir DIR`. The
+8 KiB UART stub is never sent as vendor Stage 2 (that causes `EBUNDLE`).
+`--chip` overrides the Stage 1 window for non-stub images. Sizes and addresses
+accept decimal or `0x` hex.
+
 ## Commands
 
 Pass one downloader command as the quoted argument to `-c`:
@@ -107,14 +114,29 @@ sflash_otp getregion
 sflash_otp read <address> <length> <host-file>
 sflash_otp write <address> <host-file>
 sflash_otp erase
+sflash_otp lock
+sflash_otp setregion <num>
 
 flash badinfo
 flash erase [nospread] <partition|address> [length]
 flash eraseall
+flash scrub <address> <length>
+flash scrub all
+flash mark bad <address>
+
+netdump <partition|address> <size> <host-file>
+netdown <partition|address> <host-file>
+net <args...>
 
 compare <host-file> <host-file>
 load_conf_down <config-file> <transport> [transport-path]
 ```
+
+`netdump` / `netdown` use GxLoader's non-RFC TFTP client on UDP port 2000
+(not 69). The PC is the server; bind with `-p/--pcip` when auto-detect picks
+the wrong NIC. `-s/--stbip` defaults to the host IPv4 plus one. `--tftp-port`
+changes the well-known port. ICMP echo from the board is answered by the
+kernel, so `--pcip` must be a real local address.
 
 Config files contain one command per line. Empty lines and lines beginning with
 `#` are ignored, and execution stops on the first invalid or failed command.
@@ -128,9 +150,20 @@ Examples:
 ./gxdl-c -m gemini-6702H5-sflash-24M -d /dev/ttyUSB0 \
   -c "serialdump BOOT 65536 boot-backup.bin"
 
+# Dump from a hex flash address
+./gxdl-c -t nns -d /dev/ttyUSB0 -c "serialdump 0x0 0x1000 slice.bin"
+
 # Write a logo over UART
 ./gxdl-c -b loader.boot -d /dev/ttyUSB0 \
   -c "serialdown LOGO logo.bin"
+
+# Ethernet dump (direct PC to STB cable)
+./gxdl-c -t nns -d /dev/ttyUSB0 -p 192.168.120.100 -s 192.168.120.101 \
+  -c "netdump BOOT 131072 boot-net.bin"
+
+# Open IPL stub plus family bootcode
+./gxdl-c -b gx-universal-ipl.boot --bootcode gx6702-bootcode.bin \
+  -d /dev/ttyUSB0
 
 # Read OTP without uploading a loader
 ./gxdl-c -t nns -d /dev/ttyUSB0 -c "gx_otp tread 0 32"
@@ -138,10 +171,12 @@ Examples:
 
 ## Safety
 
-Writing flash or OTP data can permanently brick a device. `flash erase` and
-`flash eraseall` require interactive confirmation; `-y` bypasses those prompts
-for compatibility with scripted use. Other write commands retain the reference
-tool's warning-only behavior. OTP writes may be irreversible.
+Writing flash or OTP data can permanently brick a device. `flash erase`,
+`flash eraseall`, `flash scrub`, `flash mark bad`, `sflash_otp lock`,
+`sflash_otp setregion`, and `netdown` require interactive confirmation; `-y`
+bypasses those prompts for compatibility with scripted use. Other write
+commands retain the reference tool's warning-only behavior. OTP writes may be
+irreversible.
 
 Back up the complete flash before writing it, verify board and loader identity,
 and keep power stable throughout erase/write operations.
@@ -180,9 +215,12 @@ The reverse-engineered packet details and known handshake variants are in
 The current uploader follows the chip-dependent Stage 1 layouts from the
 protocol reference: `0x6612` transfers `0x3fe0` payload bytes, the `0x6616`,
 `0x3211`, `0x6701`, and `0x6705` families transfer `0x1ffc` bytes, and other
-chips transfer `0xffc` bytes. Stage 2 uses a 32-bit little-endian additive
-checksum followed by the image size. Synchronization accepts split/noisy
-handshakes and tolerant RUNGET variants observed in IPL output.
+chips transfer `0xffc` bytes. UART IPL stubs always use the 8 KiB window.
+After RUNGET, a `GXID` line selects GXBC Stage 2 for gemini/cygnus; other
+families are detection-only. Without GXID the vendor `"toob"` + code transform
+is used. Stage 2 uses a 32-bit little-endian additive checksum followed by the
+image size. Synchronization accepts split/noisy handshakes and tolerant RUNGET
+variants observed in IPL output.
 
 ## Using libgxdl
 

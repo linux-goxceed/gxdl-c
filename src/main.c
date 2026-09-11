@@ -87,7 +87,13 @@ int main(int argc, const char **argv) {
     const char *device = NULL;
     const char *command = NULL;
     const char *transfer_mode = "s";
+    const char *bootcode = NULL;
+    const char *bootcode_dir = NULL;
+    const char *pcip = NULL;
+    const char *stbip = NULL;
     int baud = 115200;
+    int tftp_port = 2000;
+    int chip = -1;
     int assume_yes = 0, verbose = 0, reset_dtr = 0, reset_rts = 0;
     int loopback = 0, show_loaders = 0;
     gx_loader loader;
@@ -109,6 +115,14 @@ int main(int argc, const char **argv) {
         OPT_BOOLEAN(0, "reset-dtr", &reset_dtr, "pulse DTR before boot upload", NULL, 0, 0),
         OPT_BOOLEAN(0, "reset-rts", &reset_rts, "pulse RTS before boot upload", NULL, 0, 0),
         OPT_BOOLEAN(0, "loopback-test", &loopback, "test a TX-to-RX serial loopback", NULL, 0, 0),
+        OPT_GROUP("Open IPL / Stage 2"),
+        OPT_STRING(0, "bootcode", &bootcode, "DDR bootcode binary sent as GXBC after GXID", NULL, 0, 0),
+        OPT_STRING(0, "bootcode-dir", &bootcode_dir, "directory containing gx6702/gx6706 bootcode files", NULL, 0, 0),
+        OPT_INTEGER(0, "chip", &chip, "override Stage 1 chip ID (ignored for UART stubs)", NULL, 0, 0),
+        OPT_GROUP("Network / TFTP"),
+        OPT_STRING('p', "pcip", &pcip, "host IPv4 for TFTP (default: auto-detect)", NULL, 0, 0),
+        OPT_STRING('s', "stbip", &stbip, "board IPv4 (default: host IP + 1)", NULL, 0, 0),
+        OPT_INTEGER(0, "tftp-port", &tftp_port, "TFTP port (default: 2000)", NULL, 0, 0),
         OPT_GROUP("Operation"),
         OPT_STRING('c', "command", &command, "bootloader command to execute", NULL, 0, 0),
         OPT_STRING('t', "transfer-mode", &transfer_mode, "s (upload) or nns (existing prompt)", NULL, 0, 0),
@@ -138,14 +152,21 @@ int main(int argc, const char **argv) {
         "  flash erase [nospread] <partition|address> [length]\n"
         "  flash badinfo\n"
         "  flash eraseall\n"
+        "  flash scrub <address> <length>\n"
+        "  flash scrub all\n"
+        "  flash mark bad <address>\n"
         "  load_conf_down <config-file> <transport> [transport-path]\n"
         "  gx_otp read <address> <length> <host-file>\n"
         "  gx_otp tread <address> <length>\n"
         "  gx_otp write <address> <host-file>\n"
         "  gx_otp twrite <address> <hex-digits>\n"
-        "  sflash_otp status|getregion|erase\n"
+        "  sflash_otp status|getregion|erase|lock\n"
+        "  sflash_otp setregion <num>\n"
         "  sflash_otp read <address> <length> <host-file>\n"
         "  sflash_otp write <address> <host-file>\n"
+        "  netdump <partition|address> <length> <host-file>\n"
+        "  netdown <partition|address> <host-file>\n"
+        "  net <args...>\n"
         "  compare <src-file> <dst-file>\n"
         "\n"
         "Examples:\n"
@@ -170,6 +191,14 @@ int main(int argc, const char **argv) {
     }
     if (baud <= 0) {
         fprintf(stderr, "[!] Baud rate must be positive\n");
+        return 2;
+    }
+    if (tftp_port <= 0 || tftp_port > 65535) {
+        fprintf(stderr, "[!] TFTP port must be 1..65535\n");
+        return 2;
+    }
+    if (chip < -1 || chip > 0xFFFF) {
+        fprintf(stderr, "[!] Chip ID override must fit in 16 bits\n");
         return 2;
     }
     if (!device) {
@@ -199,10 +228,7 @@ int main(int argc, const char **argv) {
         } else if (!gx_loader_from_model(model, &loader)) {
             return 1;
         }
-        fprintf(stderr, "[+] Loaded boot image: %s (%zu bytes)\n",
-                loader.description, loader.size);
-        fprintf(stderr, "    Version: 0x%04x, Chip: 0x%04x, Baud: %u\n",
-                loader.version, loader.chip, loader.baud);
+        gx_loader_print_info(&loader);
     }
     memset(&ctx, 0, sizeof(ctx));
     ctx.serial.fd = -1;
@@ -210,6 +236,16 @@ int main(int argc, const char **argv) {
     ctx.assume_yes = assume_yes != 0;
     ctx.reset_dtr = reset_dtr != 0;
     ctx.reset_rts = reset_rts != 0;
+    ctx.bootcode_path = bootcode;
+    ctx.bootcode_dir = bootcode_dir;
+    ctx.boot_file = boot_path;
+    ctx.pcip = pcip;
+    ctx.stbip = stbip;
+    ctx.tftp_port = (unsigned int)tftp_port;
+    if (chip >= 0) {
+        ctx.has_chip_override = true;
+        ctx.chip_override = (uint16_t)chip;
+    }
     if (gx_serial_open(&ctx.serial, device, (unsigned int)baud, ctx.verbose) != 0)
         goto done;
     active_fd = ctx.serial.fd;

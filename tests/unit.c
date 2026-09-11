@@ -18,6 +18,9 @@ static void test_endian_and_checksum(void) {
     assert(gx_read_le16(bytes) == 0xabcd);
     gx_write_le32(bytes, 0x12345678U);
     assert(gx_read_le32(bytes) == 0x12345678U);
+    gx_write_be16(bytes, 0xabcd);
+    assert(bytes[0] == 0xab && bytes[1] == 0xcd);
+    assert(gx_read_be16(bytes) == 0xabcd);
     gx_write_be32(bytes, 0x12345678U);
     assert(memcmp(bytes, "\x12\x34\x56\x78", 4) == 0);
     assert(gx_checksum(payload, sizeof(payload)) ==
@@ -112,7 +115,8 @@ static void test_parsing_and_compare(void) {
     char right[] = "/tmp/gxdl-right-XXXXXX";
     int lfd, rfd;
     assert(gx_parse_u64("12345", &value) && value == 12345);
-    assert(!gx_parse_u64("0x10", &value));
+    assert(gx_parse_u64("0x10", &value) && value == 0x10);
+    assert(gx_parse_u64("0X20", &value) && value == 0x20);
     assert(!gx_parse_u64("-1", &value));
     assert(!gx_parse_u64("12x", &value));
     lfd = mkstemp(left);
@@ -137,11 +141,83 @@ static void test_public_api(void) {
     assert(options.device == NULL);
     assert(options.baud == 115200U);
     assert(!options.verbose && !options.assume_yes);
-    assert(strcmp(gxdl_version(), "1.0.0") == 0);
+    assert(strcmp(gxdl_version(), "1.1.0") == 0);
     assert(gxdl_model_count() == 0);
     assert(gxdl_model_name(0) == NULL);
     errno = 0;
     assert(gxdl_open(NULL) == NULL && errno == EINVAL);
+}
+
+static void test_open_ipl_helpers(void) {
+    uint8_t *source = calloc(1, 0x2020);
+    uint8_t *packet = NULL;
+    uint8_t *wrapped = NULL;
+    size_t packet_size = 0, wrapped_size = 0;
+    uint16_t extras[6];
+    gx_loader loader;
+    char family[32], name[64];
+    char ip[16];
+    static const uint8_t payload[] = {1, 2, 3, 4, 5};
+    uint32_t sum = 1U + 2U + 3U + 4U + 5U;
+    assert(source);
+    memcpy(source, "toob", 4);
+    gx_write_le16(source + 6, 0x9999);
+    memcpy(source + 0x0C, "GXMT", 4);
+    source[0x10] = 1;
+    source[0x11] = 2;
+    gx_write_le16(source + 0x12, 0x6705);
+    gx_write_le16(source + 0x14, 0x6616);
+    assert(gx_is_uart_ipl_stub(source, 0x2020));
+    assert(gx_parse_target_catalog(source, 0x2020, extras, 6) == 2);
+    assert(extras[0] == 0x6705 && extras[1] == 0x6616);
+    memset(&loader, 0, sizeof(loader));
+    loader.data = source;
+    loader.size = 0x2020;
+    loader.has_chip_override = true;
+    loader.chip_override = 0x6612;
+    assert(gx_loader_validate(&loader));
+    assert(gx_build_stage1(&loader, &packet, &packet_size));
+    assert(packet_size == 0x1ffcU + 9U);
+    assert(gx_read_le16(packet + 1) == 0x0800);
+    free(packet);
+    free(source);
+
+    source = calloc(1, 0x4000);
+    assert(source);
+    memcpy(source, "toob", 4);
+    gx_write_le16(source + 6, 0x6701);
+    memset(&loader, 0, sizeof(loader));
+    loader.data = source;
+    loader.size = 0x4000;
+    loader.has_chip_override = true;
+    loader.chip_override = 0x6612;
+    assert(gx_loader_validate(&loader));
+    assert(!gx_is_uart_ipl_stub(source, 0x4000));
+    assert(gx_build_stage1(&loader, &packet, &packet_size));
+    assert(packet_size == 0x3fe0U + 9U);
+    free(packet);
+    free(source);
+
+    assert(gx_wrap_gxbc(payload, sizeof(payload), &wrapped, &wrapped_size));
+    assert(wrapped_size == 16U + sizeof(payload));
+    assert(gx_read_le32(wrapped) == GX_GXBC_MAGIC);
+    assert(gx_read_le32(wrapped + 4) == sizeof(payload));
+    assert(gx_read_le32(wrapped + 8) == GX_GXBC_ENTRY);
+    assert(gx_read_le32(wrapped + 12) == sum);
+    assert(memcmp(wrapped + 16, payload, sizeof(payload)) == 0);
+    free(wrapped);
+
+    {
+        static const char gxid[] = "noise GXID family=gemini name=6702S5-NNNB\n";
+        assert(gx_parse_gxid((const uint8_t *)gxid, sizeof(gxid) - 1U, family,
+                             sizeof(family), name, sizeof(name)));
+        assert(strcmp(family, "gemini") == 0 && strcmp(name, "6702S5-NNNB") == 0);
+    }
+    assert(gx_family_trains_ddr("gemini") && gx_family_trains_ddr("cygnus"));
+    assert(!gx_family_trains_ddr("taurus"));
+    assert(strcmp(gx_bootcode_filename_for_family("gemini"), "gx6702-bootcode.bin") == 0);
+    assert(gx_next_ipv4("192.168.1.1", ip, sizeof(ip)) && strcmp(ip, "192.168.1.2") == 0);
+    assert(gx_next_ipv4("10.0.0.255", ip, sizeof(ip)) && strcmp(ip, "10.0.1.0") == 0);
 }
 
 int main(void) {
@@ -151,6 +227,7 @@ int main(void) {
     test_chip_stage1_sizes();
     test_parsing_and_compare();
     test_public_api();
+    test_open_ipl_helpers();
     assert(gx_embedded_loader_count() == 0);
     puts("unit tests: OK");
     return 0;

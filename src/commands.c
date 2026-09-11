@@ -52,7 +52,7 @@ static void free_words(words *args) {
 static bool parse_size(const char *text, size_t *size) {
     uint64_t value;
     if (!gx_parse_u64(text, &value) || value > SIZE_MAX) {
-        fprintf(stderr, "[!] Invalid decimal size or address: %s\n", text);
+        fprintf(stderr, "[!] Invalid size or address: %s\n", text);
         return false;
     }
     *size = (size_t)value;
@@ -60,26 +60,7 @@ static bool parse_size(const char *text, size_t *size) {
 }
 
 static bool command_begin(gx_context *ctx, const char *command, gx_buffer *extra) {
-    size_t len = strlen(command);
-    gx_buffer_init(extra);
-    if (!gx_wait_prompt(ctx, 2000))
-        return false;
-    if (ctx->verbose)
-        fprintf(stderr, "[*] Sending command: %s\n", command);
-    if (gx_serial_write_all(&ctx->serial, command, len, 5000) != 0 ||
-        gx_serial_write_all(&ctx->serial, "\n", 1, 1000) != 0 ||
-        gx_serial_drain(&ctx->serial) != 0) {
-        fprintf(stderr, "[!] Command write failed: %s\n", strerror(errno));
-        return false;
-    }
-    if (!gx_internal_wait_marker(ctx, extra, command, 5000, true)) {
-        fprintf(stderr, "[!] Command was not echoed: %s\n", command);
-        gx_buffer_free(extra);
-        return false;
-    }
-    while (extra->len && (extra->data[0] == '\r' || extra->data[0] == '\n'))
-        gx_buffer_consume(extra, 1);
-    return true;
+    return gx_command_begin(ctx, command, extra);
 }
 
 static bool text_command(gx_context *ctx, const char *command, int timeout_ms) {
@@ -124,33 +105,6 @@ static bool confirm(gx_context *ctx, const char *warning) {
         return true;
     fprintf(stderr, "[!] Aborted\n");
     return false;
-}
-
-static bool read_file(const char *path, uint8_t **data, size_t *size) {
-    FILE *file = fopen(path, "rb");
-    long length;
-    uint8_t *bytes;
-    if (!file) {
-        fprintf(stderr, "[!] Cannot open %s: %s\n", path, strerror(errno));
-        return false;
-    }
-    if (fseek(file, 0, SEEK_END) != 0 || (length = ftell(file)) < 0 ||
-        fseek(file, 0, SEEK_SET) != 0 || (unsigned long)length > SIZE_MAX) {
-        fprintf(stderr, "[!] Cannot determine size of %s\n", path);
-        fclose(file);
-        return false;
-    }
-    bytes = malloc((size_t)length ? (size_t)length : 1U);
-    if (!bytes || fread(bytes, 1, (size_t)length, file) != (size_t)length) {
-        fprintf(stderr, "[!] Cannot read %s\n", path);
-        free(bytes);
-        fclose(file);
-        return false;
-    }
-    fclose(file);
-    *data = bytes;
-    *size = (size_t)length;
-    return true;
 }
 
 static bool binary_read(gx_context *ctx, const char *command, size_t size,
@@ -273,7 +227,7 @@ static bool binary_write(gx_context *ctx, const char *command_prefix,
     gx_buffer response;
     void *progress = NULL;
     bool ok = false;
-    if (!read_file(input_file, &data, &size))
+    if (!gx_read_file(input_file, &data, &size))
         return false;
     {
         int needed = snprintf(NULL, 0, "%s %zu", command_prefix, size);
@@ -397,6 +351,19 @@ done:
     return same;
 }
 
+static bool join_command(char *line, size_t line_size, const words *args, size_t start) {
+    size_t i, pos = 0;
+    line[0] = '\0';
+    for (i = start; i < args->argc; ++i) {
+        int needed = snprintf(line + pos, line_size - pos, "%s%s",
+                              i > start ? " " : "", args->argv[i]);
+        if (needed < 0 || (size_t)needed >= line_size - pos)
+            return false;
+        pos += (size_t)needed;
+    }
+    return true;
+}
+
 static bool dispatch(gx_context *ctx, const words *args, bool from_config) {
     const char *cmd;
     char line[1024];
@@ -409,7 +376,7 @@ static bool dispatch(gx_context *ctx, const words *args, bool from_config) {
             fprintf(stderr, "[!] Usage: serialdump <partition|addr> <size> <file>\n");
             return false;
         }
-        snprintf(line, sizeof(line), "serialdump %s %zu", args->argv[1], size);
+        snprintf(line, sizeof(line), "serialdump %s %s", args->argv[1], args->argv[2]);
         return binary_read(ctx, line, size, args->argv[3]);
     }
     if (strcmp(cmd, "serialdown") == 0) {
@@ -425,7 +392,7 @@ static bool dispatch(gx_context *ctx, const words *args, bool from_config) {
             fprintf(stderr, "[!] Usage: usbdump <partition|addr> <size> <file>\n");
             return false;
         }
-        snprintf(line, sizeof(line), "usbdump %s %zu %s", args->argv[1], size,
+        snprintf(line, sizeof(line), "usbdump %s %s %s", args->argv[1], args->argv[2],
                  args->argv[3]);
         return text_command(ctx, line, 120000);
     }
@@ -443,24 +410,24 @@ static bool dispatch(gx_context *ctx, const words *args, bool from_config) {
         if (strcmp(args->argv[1], "read") == 0) {
             if (args->argc != 5 || !parse_size(args->argv[2], &address) ||
                 !parse_size(args->argv[3], &size)) goto gx_usage;
-            snprintf(line, sizeof(line), "gx_otp read %zu %zu", address, size);
+            snprintf(line, sizeof(line), "gx_otp read %s %s", args->argv[2], args->argv[3]);
             return binary_read(ctx, line, size, args->argv[4]);
         }
         if (strcmp(args->argv[1], "tread") == 0) {
             if (args->argc != 4 || !parse_size(args->argv[2], &address) ||
                 !parse_size(args->argv[3], &size)) goto gx_usage;
-            snprintf(line, sizeof(line), "gx_otp tread %zu %zu", address, size);
+            snprintf(line, sizeof(line), "gx_otp tread %s %s", args->argv[2], args->argv[3]);
             return text_command(ctx, line, 5000);
         }
         if (strcmp(args->argv[1], "write") == 0) {
             if (args->argc != 4 || !parse_size(args->argv[2], &address)) goto gx_usage;
-            snprintf(line, sizeof(line), "gx_otp write %zu", address);
+            snprintf(line, sizeof(line), "gx_otp write %s", args->argv[2]);
             return binary_write(ctx, line, args->argv[3], false);
         }
         if (strcmp(args->argv[1], "twrite") == 0) {
             if (args->argc != 4 || !parse_size(args->argv[2], &address)) goto gx_usage;
             fprintf(stderr, "[!] WARNING: GX OTP writes may be irreversible\n");
-            snprintf(line, sizeof(line), "gx_otp twrite %zu %s", address, args->argv[3]);
+            snprintf(line, sizeof(line), "gx_otp twrite %s %s", args->argv[2], args->argv[3]);
             return text_command(ctx, line, 30000);
         }
 gx_usage:
@@ -476,20 +443,34 @@ gx_usage:
         if (strcmp(args->argv[1], "read") == 0) {
             if (args->argc != 5 || !parse_size(args->argv[2], &address) ||
                 !parse_size(args->argv[3], &size)) goto sflash_usage;
-            snprintf(line, sizeof(line), "sflash_otp read %zu %zu", address, size);
+            snprintf(line, sizeof(line), "sflash_otp read %s %s", args->argv[2],
+                     args->argv[3]);
             return binary_read(ctx, line, size, args->argv[4]);
         }
         if (strcmp(args->argv[1], "write") == 0) {
             if (args->argc != 4 || !parse_size(args->argv[2], &address)) goto sflash_usage;
-            snprintf(line, sizeof(line), "sflash_otp write %zu", address);
+            snprintf(line, sizeof(line), "sflash_otp write %s", args->argv[2]);
             return binary_write(ctx, line, args->argv[3], false);
         }
         if (strcmp(args->argv[1], "erase") == 0 && args->argc == 2) {
             fprintf(stderr, "[!] WARNING: SPI flash OTP erase may be irreversible\n");
             return text_command(ctx, "sflash_otp erase", 30000);
         }
+        if (strcmp(args->argv[1], "lock") == 0 && args->argc == 2) {
+            if (!confirm(ctx, "This will lock SPI Flash OTP."))
+                return false;
+            return text_command(ctx, "sflash_otp lock", 30000);
+        }
+        if (strcmp(args->argv[1], "setregion") == 0 && args->argc == 3) {
+            if (!parse_size(args->argv[2], &size))
+                goto sflash_usage;
+            if (!confirm(ctx, "This will set SPI Flash OTP region selection."))
+                return false;
+            snprintf(line, sizeof(line), "sflash_otp setregion %s", args->argv[2]);
+            return text_command(ctx, line, 5000);
+        }
 sflash_usage:
-        fprintf(stderr, "[!] Usage: sflash_otp <status|getregion|read|write|erase> ...\n");
+        fprintf(stderr, "[!] Usage: sflash_otp <status|getregion|read|write|erase|lock|setregion> ...\n");
         return false;
     }
     if (strcmp(cmd, "flash") == 0) {
@@ -509,17 +490,66 @@ sflash_usage:
                 return false;
             if (args->argc == i + 2) {
                 if (!parse_size(args->argv[i + 1], &size)) return false;
-                snprintf(line, sizeof(line), "flash erase %s%s %zu",
-                         nospread ? "nospread " : "", args->argv[i], size);
+                snprintf(line, sizeof(line), "flash erase %s%s %s",
+                         nospread ? "nospread " : "", args->argv[i], args->argv[i + 1]);
             } else {
                 snprintf(line, sizeof(line), "flash erase %s%s",
                          nospread ? "nospread " : "", args->argv[i]);
             }
             return text_command(ctx, line, 120000);
         }
+        if (args->argc >= 2 && strcmp(args->argv[1], "scrub") == 0) {
+            if (args->argc == 3 && strcmp(args->argv[2], "all") == 0) {
+                if (!confirm(ctx, "This will scrub NAND and can discard factory bad-block markers."))
+                    return false;
+                return text_command(ctx, "flash scrub all", 300000);
+            }
+            if (args->argc != 4 || !parse_size(args->argv[2], &address) ||
+                !parse_size(args->argv[3], &size)) {
+                fprintf(stderr, "[!] Usage: flash scrub <flash addr> <length>\n");
+                fprintf(stderr, "[!]        flash scrub all\n");
+                return false;
+            }
+            if (!confirm(ctx, "This will scrub NAND and can discard factory bad-block markers."))
+                return false;
+            snprintf(line, sizeof(line), "flash scrub %s %s", args->argv[2], args->argv[3]);
+            return text_command(ctx, line, 120000);
+        }
+        if (args->argc == 4 && strcmp(args->argv[1], "mark") == 0 &&
+            strcmp(args->argv[2], "bad") == 0) {
+            if (!parse_size(args->argv[3], &address))
+                goto flash_usage;
+            if (!confirm(ctx, "This will mark a NAND block as bad."))
+                return false;
+            snprintf(line, sizeof(line), "flash mark bad %s", args->argv[3]);
+            return text_command(ctx, line, 30000);
+        }
 flash_usage:
-        fprintf(stderr, "[!] Usage: flash <erase [nospread] target [length]|badinfo|eraseall>\n");
+        fprintf(stderr, "[!] Usage: flash <erase [nospread] target [length]|badinfo|eraseall|scrub|mark bad>\n");
         return false;
+    }
+    if (strcmp(cmd, "netdump") == 0) {
+        if (args->argc != 4 || !parse_size(args->argv[2], &size)) {
+            fprintf(stderr, "[!] Usage: netdump <partition|addr> <size> <file>\n");
+            return false;
+        }
+        return gx_net_dump(ctx, args->argv[1], args->argv[2], size, args->argv[3]);
+    }
+    if (strcmp(cmd, "netdown") == 0) {
+        if (args->argc != 3) {
+            fprintf(stderr, "[!] Usage: netdown <partition|addr> <file>\n");
+            return false;
+        }
+        if (!confirm(ctx, "netdown writes flash over TFTP and can brick the device."))
+            return false;
+        return gx_net_download(ctx, args->argv[1], args->argv[2]);
+    }
+    if (strcmp(cmd, "net") == 0) {
+        if (!join_command(line, sizeof(line), args, 0)) {
+            fprintf(stderr, "[!] net command is too long\n");
+            return false;
+        }
+        return text_command(ctx, line, 30000);
     }
     if (strcmp(cmd, "compare") == 0) {
         if (args->argc != 3) {
@@ -537,6 +567,8 @@ flash_usage:
         return gx_run_config(ctx, args->argv[1]);
     }
     fprintf(stderr, "[!] Unknown or unsupported command: %s\n", cmd);
+    fprintf(stderr, "[*] Available commands: serialdump, serialdown, usbdump, usbdown,\n");
+    fprintf(stderr, "    gx_otp, sflash_otp, flash, compare, load_conf_down, netdump, netdown, net\n");
     return false;
 }
 

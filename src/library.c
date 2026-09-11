@@ -10,15 +10,35 @@
 struct gxdl_session {
     gx_context context;
     char *device;
+    char *bootcode;
+    char *bootcode_dir;
+    char *pcip;
+    char *stbip;
     char error[160];
 };
 
 static char *copy_string(const char *value) {
-    size_t length = strlen(value) + 1U;
-    char *copy = malloc(length);
+    size_t length;
+    char *copy;
+    if (!value)
+        return NULL;
+    length = strlen(value) + 1U;
+    copy = malloc(length);
     if (copy)
         memcpy(copy, value, length);
     return copy;
+}
+
+static void free_session(gxdl_session *session) {
+    if (!session)
+        return;
+    gx_serial_close(&session->context.serial);
+    free(session->device);
+    free(session->bootcode);
+    free(session->bootcode_dir);
+    free(session->pcip);
+    free(session->stbip);
+    free(session);
 }
 
 static int failed(gxdl_session *session, const char *message) {
@@ -50,16 +70,44 @@ gxdl_session *gxdl_open(const gxdl_options *options) {
         free(session);
         return NULL;
     }
+    if (options->bootcode && !(session->bootcode = copy_string(options->bootcode))) {
+        free_session(session);
+        errno = ENOMEM;
+        return NULL;
+    }
+    if (options->bootcode_dir &&
+        !(session->bootcode_dir = copy_string(options->bootcode_dir))) {
+        free_session(session);
+        errno = ENOMEM;
+        return NULL;
+    }
+    if (options->pcip && !(session->pcip = copy_string(options->pcip))) {
+        free_session(session);
+        errno = ENOMEM;
+        return NULL;
+    }
+    if (options->stbip && !(session->stbip = copy_string(options->stbip))) {
+        free_session(session);
+        errno = ENOMEM;
+        return NULL;
+    }
     baud = options->baud ? options->baud : 115200U;
     session->context.verbose = options->verbose;
     session->context.assume_yes = options->assume_yes;
     session->context.reset_dtr = options->reset_dtr;
     session->context.reset_rts = options->reset_rts;
+    session->context.bootcode_path = session->bootcode;
+    session->context.bootcode_dir = session->bootcode_dir;
+    session->context.pcip = session->pcip;
+    session->context.stbip = session->stbip;
+    session->context.tftp_port = options->tftp_port;
+    session->context.has_chip_override = options->has_chip_override;
+    session->context.chip_override = (uint16_t)options->chip_override;
     if (gx_serial_open(&session->context.serial, session->device, baud,
                        options->verbose) != 0) {
         int saved_errno = errno;
-        free(session->device);
-        free(session);
+        session->context.serial.fd = -1;
+        free_session(session);
         errno = saved_errno;
         return NULL;
     }
@@ -67,11 +115,7 @@ gxdl_session *gxdl_open(const gxdl_options *options) {
 }
 
 void gxdl_close(gxdl_session *session) {
-    if (!session)
-        return;
-    gx_serial_close(&session->context.serial);
-    free(session->device);
-    free(session);
+    free_session(session);
 }
 
 int gxdl_boot_file(gxdl_session *session, const char *path) {
@@ -83,6 +127,8 @@ int gxdl_boot_file(gxdl_session *session, const char *path) {
     }
     if (!gx_loader_from_file(path, &loader))
         return failed(session, "failed to load external boot image");
+    gx_loader_print_info(&loader);
+    session->context.boot_file = path;
     result = gx_boot(&session->context, &loader, true);
     gx_loader_release(&loader);
     return result ? 0 : failed(session, "bootloader upload failed");
@@ -97,6 +143,7 @@ int gxdl_boot_model(gxdl_session *session, const char *model) {
     }
     if (!gx_loader_from_model(model, &loader))
         return failed(session, "embedded loader was not found or is invalid");
+    gx_loader_print_info(&loader);
     result = gx_boot(&session->context, &loader, true);
     gx_loader_release(&loader);
     return result ? 0 : failed(session, "bootloader upload failed");
@@ -159,5 +206,5 @@ int gxdl_compare(const char *left, const char *right) {
 }
 
 const char *gxdl_version(void) {
-    return "1.0.0";
+    return "1.1.0";
 }

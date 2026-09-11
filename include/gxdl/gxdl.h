@@ -9,7 +9,7 @@ extern "C" {
 #endif
 
 #define GXDL_VERSION_MAJOR 1
-#define GXDL_VERSION_MINOR 0
+#define GXDL_VERSION_MINOR 1
 #define GXDL_VERSION_PATCH 0
 
 /** Opaque connection to a GX bootloader serial port. */
@@ -23,6 +23,13 @@ typedef struct {
     bool assume_yes;
     bool reset_dtr;
     bool reset_rts;
+    const char *bootcode;
+    const char *bootcode_dir;
+    const char *pcip;
+    const char *stbip;
+    unsigned int tftp_port;
+    bool has_chip_override;
+    unsigned int chip_override;
 } gxdl_options;
 
 /** Fill options with defaults (115200 baud, all flags disabled). */

@@ -25,7 +25,7 @@ ifneq ($(filter $(EMBED_LOADERS),0 1),$(EMBED_LOADERS))
 $(error EMBED_LOADERS must be 0 or 1)
 endif
 
-CORE_SRC := src/util.c src/serial.c src/loader.c src/protocol.c src/commands.c src/library.c
+CORE_SRC := src/util.c src/serial.c src/loader.c src/protocol.c src/commands.c src/tftp.c src/library.c
 CORE_OBJ := $(patsubst %.c,$(BUILD_DIR)/%.o,$(CORE_SRC))
 PROGRESS_OBJ := $(BUILD_DIR)/lib/progressbar/lib/progressbar.o
 APP_SRC := src/main.c lib/argparse/argparse.c
